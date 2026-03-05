@@ -1,0 +1,44 @@
+# Python Face Service: Production Readiness & Roadmap
+
+This document outlines the current state of the Python Face Service. It details the missing components required to achieve full functionality defined in the PRD and provides a checklist for production deployment.
+
+## 1. Missing Implementations
+
+To fully support the Next.js `pgvector` database architecture, the Python service acts as a "calculator". Some critical "calculator functions" are currently missing from the API.
+
+> [!CAUTION]
+> The primary Next.js backend cannot index photos without the `POST /embed-face` endpoint.
+
+### Critical Priority
+- **`POST /embed-face` Endpoint**:
+  - **What it does:** Accepts an image upload, detects the largest face using MediaPipe, and generates a 128-d vector embedding using dlib.
+  - **Why it's needed:** Next.js uses this to index new photos when the photographer uploads an event album, and to get the reference vector when a guest takes a selfie.
+  - **Status:** **MISSING** in [app/main.py](file:///d:/vscode/python/face-service/app/main.py).
+
+### Medium Priority
+- **`POST /batch-embed` Endpoint (Optional but Highly Recommended)**:
+  - **What it does:** Accepts an array of images (or a ZIP file) and returns embeddings for all of them in a single HTTP request.
+  - **Why it's needed:** When a photographer uploads 1,000 photos, the Next.js backend firing 1,000 individual [POST](file:///d:/vscode/python/frontend-test/src/app/api/find-matches/route.ts#91-143) requests to the Python service creates huge network latency and HTTP overhead. A batch endpoint reduces this to a few requests.
+  - **Status:** **MISSING**.
+
+---
+
+## 2. Production Readiness Checklist
+
+Before taking this Python microservice live (e.g., via Docker on AWS, Render, or Fly.io), the following operational concerns must be addressed.
+
+### 2.1 Performance & Concurrency
+- [ ] **Gunicorn or Uvicorn Workers:** Currently, running `uvicorn app.main:app` uses a single worker process. Since AI operations block the CPU, concurrent user uploads will bottleneck. The start command must be updated to use multiple workers (e.g., `uvicorn app.main:app --workers 4`).
+- [ ] **Thread Pool Tuning:** MediaPipe and dlib utilize C++ threads heavily. Consider wrapping blocking ML calls inside `run_in_threadpool` or `asyncio.to_thread` to prevent them from locking FastAPI's async event loop.
+
+### 2.2 Stability & Validation
+- [x] **Automated Testing:** 10 core logic tests pass successfully.
+- [ ] **Input Validation Improvements:** [app/main.py](file:///d:/vscode/python/face-service/app/main.py) gracefully handles empty files, but should reject astronomically large images (e.g., >20MB) to prevent Memory (OOM) crashes.
+- [ ] **Health Checks:** The `/health` endpoint is static. It should be upgraded to initialize a dummy detection on a 1x1 pixel image to prove that the underlying `dlib` C++ libraries haven't crashed.
+
+### 2.3 API Security
+- [ ] **Authentication/API Key:** The Python service is currently completely open and public (`0.0.0.0`). Anyone who finds its IP address can use it to scan faces or DDoS the server. It MUST require an `x-api-key` header that matches a secret shared only with your Next.js backend.
+
+### 2.4 Deployment / Infrastructure
+- [ ] **Dockerfile:** Implement a [Dockerfile](file:///d:/vscode/python/face-service/Dockerfile) that correctly compiles `dlib` with `cmake` on a lightweight python-slim Linux image.
+- [ ] **Container Size Reduction:** Ensure `face_recognition_models` and other large libraries don't bloat the Docker image size beyond what is strictly necessary.

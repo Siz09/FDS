@@ -1,0 +1,59 @@
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+
+# Distribution / packaging
+*.egg-info/
+*.egg
+dist/
+build/
+wheels/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+*.cover
+
+# MyPy
+.mypy_cache/
+
+# Ruff / linters
+.ruff_cache/
+
+# ===== IDE =====
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ===== OS =====
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ===== Data & Models =====
+data/
+models/
+known/
+out/
+
+# ===== Node (frontend-test) =====
+frontend-test/node_modules/
+frontend-test/.next/
+
+# ===== Docker =====
+*.log
+
+# ===== Misc =====
+.env
+.env.*
+!.env.example

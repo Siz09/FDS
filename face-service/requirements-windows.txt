@@ -1,0 +1,8 @@
+# Windows: install these after "pip install -r requirements.txt" fails on dlib.
+# 1. pip install -r requirements.txt   (fails at dlib; other packages install)
+# 2. pip install dlib-bin
+# 3. pip install face_recognition --no-deps
+# 4. pip install -r requirements-windows.txt
+face-recognition-models>=0.3.0
+Click>=6.0
+colorama>=0.4.6

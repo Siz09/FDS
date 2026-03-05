@@ -1,0 +1,22 @@
+# Smart Gallery face pipeline
+# Python 3.10+
+
+# API server
+fastapi[standard]>=0.115.0
+uvicorn[standard]>=0.30.0
+
+# Structured logging
+structlog>=24.0.0
+
+# Face detection (commercial-safe, fast, multi-face)
+mediapipe>=0.10.0
+
+# Face embedding (128-d dlib encoding)
+face_recognition>=1.3.0
+
+# Image I/O and preprocessing
+opencv-python>=4.8.0
+numpy>=1.24.0
+
+# Tests
+pytest>=7.0.0

@@ -1,0 +1,3 @@
+# CPU-only variant (no GPU). Same as requirements.txt for this pipeline.
+# face_recognition uses dlib (CPU). MediaPipe runs on CPU by default.
+-r requirements.txt
