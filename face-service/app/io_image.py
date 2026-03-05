@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import sys
+import urllib.request
 from pathlib import Path
 from typing import Tuple
 
@@ -36,6 +37,24 @@ def load_image_from_bytes(image_bytes: bytes) -> np.ndarray | None:
     nparr = np.frombuffer(image_bytes, np.uint8)
     img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
     return img
+
+
+def load_image_from_url(url: str, timeout: int = 10) -> np.ndarray | None:
+    """Download image from HTTP/HTTPS URL and load with OpenCV.
+
+    Args:
+        url: HTTP/HTTPS URL pointing to an image file.
+        timeout: Request timeout in seconds.
+
+    Returns:
+        BGR array or None if download or decode fails.
+    """
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as response:
+            image_bytes = response.read()
+        return load_image_from_bytes(image_bytes)
+    except Exception:
+        return None
 
 
 def bgr_to_rgb(bgr: np.ndarray) -> np.ndarray:
