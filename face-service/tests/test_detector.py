@@ -128,7 +128,7 @@ def test_load_image_from_url_bad_scheme_returns_none():
     assert result is None
 
 
-def test_load_image_from_url_valid_bytes(tmp_path):
+def test_load_image_from_url_valid_bytes():
     """When urlopen returns valid JPEG bytes, the result is a BGR numpy array."""
     import cv2
 

@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import sys
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Tuple
@@ -49,6 +50,8 @@ def load_image_from_url(url: str, timeout: int = 10) -> np.ndarray | None:
     Returns:
         BGR array or None if download or decode fails.
     """
+    if urllib.parse.urlparse(url).scheme not in ("http", "https"):
+        return None
     try:
         with urllib.request.urlopen(url, timeout=timeout) as response:
             image_bytes = response.read()
