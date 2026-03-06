@@ -12,6 +12,7 @@ from app.logging_config import setup_logging
 from app.middleware import RequestLoggingMiddleware
 
 _startup_time: float = 0.0
+_embedder = embedder.FaceRecognitionEmbedder()
 
 
 @asynccontextmanager
@@ -83,6 +84,46 @@ async def detect_face(
         raise
     except Exception as e:
         log.error("detect-face failed", error=str(e))
+        raise HTTPException(status_code=500, detail=f"Error processing image: {str(e)}")
+
+
+@app.post("/embed-face")
+async def embed_face(image: UploadFile = File(...)):
+    """Generate 128-d face embeddings for all faces detected in an uploaded image.
+
+    Returns:
+        JSON with list of faces, each containing a 128-d embedding and bounding box
+    """
+    log = structlog.get_logger()
+    try:
+        image_bytes = await image.read()
+        img_bgr = io_image.load_image_from_bytes(image_bytes)
+
+        if img_bgr is None:
+            raise HTTPException(status_code=400, detail="Failed to load image")
+
+        img_rgb = io_image.bgr_to_rgb(img_bgr)
+        face_boxes = detector_mediapipe.detect_faces(img_rgb)
+
+        faces = []
+        for box in face_boxes:
+            crop = io_image.crop_face_region(img_rgb, box)
+            try:
+                emb = _embedder.embed_face(crop)
+                faces.append({
+                    "embedding": emb.tolist(),
+                    "box": {"x": box.x, "y": box.y, "w": box.w, "h": box.h},
+                })
+            except ValueError:
+                continue
+
+        log.info("embed-face", num_faces=len(faces))
+        return JSONResponse(content={"faces": faces})
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.error("embed-face failed", error=str(e))
         raise HTTPException(status_code=500, detail=f"Error processing image: {str(e)}")
 
 
