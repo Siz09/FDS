@@ -44,14 +44,12 @@ async def health_check():
 @app.post("/detect-face")
 async def detect_face(
     image: UploadFile = File(...),
-    min_detection_confidence: float = 0.5,
     max_faces: int = 10,
 ):
     """Detect faces in an uploaded image.
 
     Args:
         image: Image file (JPEG, PNG, etc.)
-        min_detection_confidence: Minimum confidence threshold [0, 1]
         max_faces: Maximum number of faces to return
 
     Returns:
@@ -66,11 +64,7 @@ async def detect_face(
             raise HTTPException(status_code=400, detail="Failed to load image")
 
         img_rgb = io_image.bgr_to_rgb(img_bgr)
-        face_boxes = detector_mediapipe.detect_faces(
-            img_rgb,
-            min_detection_confidence=min_detection_confidence,
-            max_faces=max_faces,
-        )
+        face_boxes = detector_mediapipe.detect_faces(img_rgb, max_faces=max_faces)
 
         result = [
             {"x": box.x, "y": box.y, "w": box.w, "h": box.h}
@@ -158,8 +152,7 @@ async def match_face(
         ref_box = detector_mediapipe.get_largest_face(ref_boxes)
         ref_crop = io_image.crop_face_region(ref_rgb, ref_box)
 
-        embedder_instance = embedder.FaceRecognitionEmbedder()
-        ref_embedding = embedder_instance.embed_face(ref_crop)
+        ref_embedding = _embedder.embed_face(ref_crop)
 
         target_bytes = await target.read()
         target_bgr = io_image.load_image_from_bytes(target_bytes)
@@ -175,7 +168,7 @@ async def match_face(
         for box in target_boxes:
             target_crop = io_image.crop_face_region(target_rgb, box)
             try:
-                target_embedding = embedder_instance.embed_face(target_crop)
+                target_embedding = _embedder.embed_face(target_crop)
                 distance = embedder.euclidean_distance(ref_embedding, target_embedding)
                 if distance < best_distance:
                     best_distance = distance
