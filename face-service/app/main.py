@@ -1,7 +1,9 @@
 """FastAPI entry point for face detection and matching service."""
+import asyncio
 import time
 from contextlib import asynccontextmanager
 
+import face_recognition as _face_recognition
 import structlog
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.responses import JSONResponse
@@ -97,21 +99,62 @@ async def embed_face(image: UploadFile = File(...)):
             raise HTTPException(status_code=400, detail="Failed to load image")
 
         img_rgb = io_image.bgr_to_rgb(img_bgr)
-        face_boxes = detector_mediapipe.detect_faces(img_rgb)
+        face_boxes = await asyncio.to_thread(detector_mediapipe.detect_faces, img_rgb)
 
         faces = []
-        for box in face_boxes:
-            crop = io_image.crop_face_region(img_rgb, box)
-            try:
-                emb = _embedder.embed_face(crop)
-                faces.append({
-                    "embedding": emb.tolist(),
-                    "box": {"x": box.x, "y": box.y, "w": box.w, "h": box.h},
-                })
-            except ValueError:
-                continue
+        if face_boxes:
+            # Primary path: MediaPipe detection → crop → dlib embedding
+            for box in face_boxes:
+                crop = io_image.crop_face_region(img_rgb, box)
+                try:
+                    emb = await asyncio.to_thread(_embedder.embed_face, crop)
+                    faces.append({
+                        "embedding": emb.tolist(),
+                        "box": {"x": box.x, "y": box.y, "w": box.w, "h": box.h},
+                    })
+                except ValueError:
+                    continue
+            log.info("embed-face", detector="mediapipe", num_faces=len(faces))
+        else:
+            # Fallback: face_recognition HOG detector (better for group/event photos).
+            # Resize to ≤1280px before detection — HOG is O(W×H) and 12MP images
+            # would take 30+ seconds without downsampling.
+            import cv2 as _cv2
+            MAX_DIM = 1280
+            h, w = img_rgb.shape[:2]
+            scale = min(1.0, MAX_DIM / max(h, w))
+            if scale < 1.0:
+                detect_img = _cv2.resize(
+                    img_rgb, (int(w * scale), int(h * scale)), interpolation=_cv2.INTER_AREA
+                )
+            else:
+                detect_img = img_rgb
 
-        log.info("embed-face", num_faces=len(faces))
+            # Run blocking HOG in thread pool so the event loop stays responsive
+            # to other concurrent requests.
+            locations_scaled = await asyncio.to_thread(
+                _face_recognition.face_locations, detect_img, 1, "hog"
+            )
+            # Map detection boxes back to original image coords for accurate embedding
+            if scale < 1.0:
+                locations = [
+                    (int(t / scale), int(r / scale), int(b / scale), int(l / scale))
+                    for t, r, b, l in locations_scaled
+                ]
+            else:
+                locations = locations_scaled
+
+            encodings = await asyncio.to_thread(
+                _face_recognition.face_encodings, img_rgb, locations, 1, "small"
+            )
+            for loc, enc in zip(locations, encodings):
+                top, right, bottom, left = loc
+                faces.append({
+                    "embedding": enc.tolist(),
+                    "box": {"x": left, "y": top, "w": right - left, "h": bottom - top},
+                })
+            log.info("embed-face", detector="hog-fallback", num_faces=len(faces), scale=round(scale, 3))
+
         return JSONResponse(content={"faces": faces})
 
     except HTTPException:
