@@ -6,3 +6,4 @@
 face-recognition-models>=0.3.0
 Click>=6.0
 colorama>=0.4.6
+psutil>=5.9.8

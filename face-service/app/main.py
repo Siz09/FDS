@@ -16,6 +16,9 @@ from app.middleware import RequestLoggingMiddleware
 _startup_time: float = 0.0
 _embedder = embedder.FaceRecognitionEmbedder()
 
+_request_count: int = 0
+_total_embed_time_s: float = 0.0
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -92,6 +95,8 @@ async def embed_face(image: UploadFile = File(...)):
     """
     log = structlog.get_logger()
     try:
+        global _request_count, _total_embed_time_s
+        t0 = time.time()
         image_bytes = await image.read()
         img_bgr = io_image.load_image_from_bytes(image_bytes)
 
@@ -155,6 +160,8 @@ async def embed_face(image: UploadFile = File(...)):
                 })
             log.info("embed-face", detector="hog-fallback", num_faces=len(faces), scale=round(scale, 3))
 
+        _request_count += 1
+        _total_embed_time_s += time.time() - t0
         return JSONResponse(content={"faces": faces})
 
     except HTTPException:
@@ -233,3 +240,19 @@ async def match_face(
     except Exception as e:
         log.error("match-face failed", error=str(e))
         raise HTTPException(status_code=500, detail=f"Error matching faces: {str(e)}")
+
+
+@app.get("/stats")
+async def stats():
+    """Runtime metrics for load testing and monitoring."""
+    import psutil
+    import os
+    proc = psutil.Process(os.getpid())
+    mem = proc.memory_info()
+    return {
+        "uptime_s": round(time.time() - _startup_time, 2),
+        "requests_processed": _request_count,
+        "avg_embed_time_ms": round(_total_embed_time_s / max(_request_count, 1) * 1000, 1),
+        "memory_rss_mb": round(mem.rss / 1024 / 1024, 1),
+        "memory_vms_mb": round(mem.vms / 1024 / 1024, 1),
+    }
