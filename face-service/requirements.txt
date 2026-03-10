@@ -17,6 +17,7 @@ face_recognition>=1.3.0
 # Image I/O and preprocessing
 opencv-python>=4.8.0
 numpy>=1.24.0
+Pillow>=10.0.0
 
 # Process monitoring (used by /stats endpoint)
 psutil>=5.9.8

@@ -98,6 +98,10 @@ async def embed_face(image: UploadFile = File(...)):
         global _request_count, _total_embed_time_s
         t0 = time.time()
         image_bytes = await image.read()
+
+        if not io_image.is_valid_image(image_bytes):
+            raise HTTPException(status_code=422, detail="Invalid or corrupt image file")
+
         img_bgr = io_image.load_image_from_bytes(image_bytes)
 
         if img_bgr is None:
