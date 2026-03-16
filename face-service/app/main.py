@@ -11,7 +11,7 @@ from fastapi.responses import JSONResponse
 from app import detector_mediapipe, io_image
 from app import embedder
 from app.logging_config import setup_logging
-from app.middleware import RequestLoggingMiddleware
+from app.middleware import RequestLoggingMiddleware, ApiKeyMiddleware
 
 _startup_time: float = 0.0
 _embedder = embedder.FaceRecognitionEmbedder()
@@ -33,6 +33,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Face Service", lifespan=lifespan)
 app.add_middleware(RequestLoggingMiddleware)
+app.add_middleware(ApiKeyMiddleware)   # outermost: runs first (LIFO stack)
 
 
 @app.get("/health")
