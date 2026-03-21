@@ -22,6 +22,7 @@ from app.embedder import FaceRecognitionEmbedder
 from app.io_image import bgr_to_rgb, crop_face_region, load_image
 from app.matcher import match_image
 from app.types import FaceResult, FaceBox
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 
 # Image extensions to scan
@@ -38,29 +39,87 @@ def find_images(folder: Path) -> list[Path]:
     )
 
 
-def process_image(
+def process_single_image(
     image_path: Path,
-    rgb: np.ndarray,
-    embedder: FaceRecognitionEmbedder,
+    ref_embedding: np.ndarray,
     min_detection_confidence: float,
+    num_jitters: int,
     max_faces: int,
     pad_fraction: float,
-) -> list[FaceResult]:
-    """Detect faces, crop, embed; return list of FaceResult with embeddings."""
-    boxes = detect_faces(
+    tolerance: float,
+) -> dict:
+    """Worker function for parallel processing."""
+    img_bgr = load_image(image_path)
+    if img_bgr is None:
+        return {"path": str(image_path), "error": "Could not load image"}
+
+    rgb = bgr_to_rgb(img_bgr)    # 1. Detection
+    all_boxes = detect_faces(
         rgb,
         min_detection_confidence=min_detection_confidence,
         max_faces=max_faces,
     )
-    results: list[FaceResult] = []
-    for box in boxes:
+    if not all_boxes:
+        return {
+            "name": image_path.name,
+            "path": str(image_path),
+            "matched": False,
+            "best_distance": None,
+            "num_faces": 0,
+        }
+
+    # 2. Main Subject Filtering (Surgically Calibrated)
+    # Background faces in dense crowds often cause false positives. 
+    # We ignore faces that are < 5% of the area of the largest face.
+    # (5% is enough to keep everyone in a group photo but kill background spectators)
+    largest_area = max(b.area for b in all_boxes)
+    main_boxes = [b for b in all_boxes if b.area >= (largest_area * 0.05)]
+    
+    # Also ignore extremely small faces (< 0.5% of total image area)
+    total_area = rgb.shape[0] * rgb.shape[1]
+    main_boxes = [b for b in main_boxes if b.area >= (total_area * 0.005)]
+
+    # Limit to Top 8 largest faces to ensure group photos work but crowds are filtered
+    main_boxes = sorted(main_boxes, key=lambda b: b.area, reverse=True)[:8]
+
+    if not main_boxes:
+        return {
+            "name": image_path.name,
+            "path": str(image_path),
+            "matched": False,
+            "best_distance": None,
+            "num_faces": 0,
+        }
+    
+    face_results: list[FaceResult] = []
+    # Embedder must be initialized inside the worker for ProcessPool
+    embedder = FaceRecognitionEmbedder(num_jitters=num_jitters, model="large")
+    
+    for box in main_boxes: # Optimized focus
         crop = crop_face_region(rgb, box, pad_fraction=pad_fraction)
         try:
             emb = embedder.embed_face(crop)
-            results.append(FaceResult(bbox=box, embedding=emb, confidence=0.0))
+            face_results.append(FaceResult(bbox=box, embedding=emb, confidence=0.0))
         except Exception:
             continue
-    return results
+
+    if not face_results:
+        return {
+            "name": image_path.name,
+            "path": str(image_path),
+            "matched": False,
+            "best_distance": None,
+            "num_faces": 0,
+        }
+
+    result = match_image(ref_embedding, face_results, tolerance)
+    return {
+        "name": image_path.name,
+        "path": str(image_path),
+        "matched": result.matched,
+        "best_distance": result.best_distance,
+        "num_faces": result.num_faces,
+    }
 
 
 def main() -> int:
@@ -145,82 +204,36 @@ def main() -> int:
         print(f"No images found in {args.folder}", file=sys.stderr)
         return 0
 
-    embedder = FaceRecognitionEmbedder(num_jitters=args.num_jitters)
     matches: list[dict] = []
     report_entries: list[dict] = []
-    annotated_dir = args.save_annotated
-    if annotated_dir:
-        annotated_dir.mkdir(parents=True, exist_ok=True)
-
-    for path in image_paths:
-        img_bgr = load_image(path)
-        if img_bgr is None:
-            print(f"Warning: could not load image, skipping: {path}", file=sys.stderr)
-            continue
-        rgb = bgr_to_rgb(img_bgr)
-        face_results = process_image(
-            path,
-            rgb,
-            embedder,
-            args.min_detection_confidence,
-            args.max_faces,
-            args.pad_fraction,
-        )
-        if not face_results:
-            # No faces in image: skip (not a match)
-            report_entries.append({
-                "name": path.name,
-                "path": str(path),
-                "matched": False,
-                "best_distance": None,
-                "num_faces": 0,
-            })
-            continue
-
-        result = match_image(ref_embedding, face_results, args.tolerance)
-        report_entries.append({
-            "name": path.name,
-            "path": str(path),
-            "matched": result.matched,
-            "best_distance": result.best_distance,
-            "num_faces": result.num_faces,
-        })
-        if result.matched:
-            matches.append({
-                "name": path.name,
-                "path": str(path),
-                "best_distance": result.best_distance,
-                "num_faces": result.num_faces,
-            })
-            print(f"MATCH\tname={path.name}\tpath={path}\tbest_distance={result.best_distance:.4f}\tfaces={result.num_faces}")
-
-            if annotated_dir:
-                try:
-                    import cv2
-                    ann = img_bgr.copy()
-                    for box in result.face_boxes:
-                        cv2.rectangle(
-                            ann,
-                            (box.x, box.y),
-                            (box.x + box.w, box.y + box.h),
-                            (0, 255, 0),
-                            2,
-                        )
-                    label = f"d={result.best_distance:.3f}"
-                    cv2.putText(
-                        ann,
-                        label,
-                        (result.face_boxes[0].x, result.face_boxes[0].y - 10),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.6,
-                        (0, 255, 0),
-                        2,
-                    )
-                    out_name = path.name
-                    out_path = annotated_dir / out_name
-                    cv2.imwrite(str(out_path), ann)
-                except Exception as e:
-                    print(f"Warning: could not save annotated image: {e}", file=sys.stderr)
+    
+    # Run in parallel using 4 CPU cores (balanced for your 16GB RAM)
+    print(f"Processing {len(image_paths)} images in parallel (using 4 cores)...")
+    with ProcessPoolExecutor(max_workers=4) as executor:
+        futures = [
+            executor.submit(
+                process_single_image,
+                path,
+                ref_embedding,
+                args.min_detection_confidence,
+                args.num_jitters,
+                args.max_faces,
+                args.pad_fraction,
+                args.tolerance,
+            )
+            for path in image_paths
+        ]
+        
+        for future in as_completed(futures):
+            res = future.result()
+            if "error" in res:
+                print(f"Warning: {res['error']} for {res['path']}", file=sys.stderr)
+                continue
+            
+            report_entries.append(res)
+            if res["matched"]:
+                matches.append(res)
+                print(f"MATCH\tname={res['name']}\tbest_distance={res['best_distance']:.4f}\tfaces={res['num_faces']}")
 
     print()
     print(f"Summary: {len(matches)} match(es) out of {len(image_paths)} image(s) (tolerance={args.tolerance})")

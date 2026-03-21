@@ -472,7 +472,10 @@
   - Deployment automation
 
 ### Monitoring
-- **PostHog / GA4:** Analytics and event tracking
+- **Sentry:** Latest (optional)
+  - Error tracking
+  - Performance monitoring
+  - Release tracking
 
 ---
 

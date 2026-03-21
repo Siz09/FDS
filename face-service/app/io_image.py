@@ -6,16 +6,12 @@
 
 from __future__ import annotations
 
-import io
 import sys
-import urllib.parse
-import urllib.request
 from pathlib import Path
 from typing import Tuple
 
 import cv2
 import numpy as np
-from PIL import Image as _PILImage
 
 # Add parent for imports when run as script
 if __name__ != "__main__":
@@ -24,20 +20,6 @@ else:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.types import FaceBox
-
-
-def is_valid_image(image_bytes: bytes) -> bool:
-    """Return True if image_bytes represent a valid, non-corrupt image.
-
-    Uses PIL's verify() which catches truncated files and header corruption
-    that OpenCV may silently partially load.
-    """
-    try:
-        img = _PILImage.open(io.BytesIO(image_bytes))
-        img.verify()  # destructive — object unusable after this call
-        return True
-    except Exception:
-        return False
 
 
 def load_image(path: str | Path) -> np.ndarray | None:
@@ -54,26 +36,6 @@ def load_image_from_bytes(image_bytes: bytes) -> np.ndarray | None:
     nparr = np.frombuffer(image_bytes, np.uint8)
     img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
     return img
-
-
-def load_image_from_url(url: str, timeout: int = 10) -> np.ndarray | None:
-    """Download image from HTTP/HTTPS URL and load with OpenCV.
-
-    Args:
-        url: HTTP/HTTPS URL pointing to an image file.
-        timeout: Request timeout in seconds.
-
-    Returns:
-        BGR array or None if download or decode fails.
-    """
-    if urllib.parse.urlparse(url).scheme not in ("http", "https"):
-        return None
-    try:
-        with urllib.request.urlopen(url, timeout=timeout) as response:
-            image_bytes = response.read()
-        return load_image_from_bytes(image_bytes)
-    except Exception:
-        return None
 
 
 def bgr_to_rgb(bgr: np.ndarray) -> np.ndarray:
