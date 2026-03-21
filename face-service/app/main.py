@@ -6,12 +6,14 @@ import structlog
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.responses import JSONResponse
 
+import os
 from app import detector_mediapipe, io_image
 from app import embedder
 from app.logging_config import setup_logging
-from app.middleware import RequestLoggingMiddleware
+from app.middleware import RequestLoggingMiddleware, APIKeyMiddleware
 
 _startup_time: float = 0.0
+FACE_SERVICE_API_KEY = os.getenv("FACE_SERVICE_API_KEY")
 
 
 @asynccontextmanager
@@ -26,6 +28,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Face Service", lifespan=lifespan)
+app.add_middleware(APIKeyMiddleware, api_key=FACE_SERVICE_API_KEY)
 app.add_middleware(RequestLoggingMiddleware)
 
 
@@ -86,21 +89,75 @@ async def detect_face(
         raise HTTPException(status_code=500, detail=f"Error processing image: {str(e)}")
 
 
+@app.post("/embed-face")
+async def embed_face(
+    image: UploadFile = File(...),
+    min_detection_confidence: float = 0.3,
+    max_faces: int = 20,
+):
+    """Detect faces and return raw 128-d embeddings.
+    Required by SEG workers for background matching.
+    """
+    log = structlog.get_logger()
+    try:
+        image_bytes = await image.read()
+        img_bgr = io_image.load_image_from_bytes(image_bytes)
+
+        if img_bgr is None:
+            raise HTTPException(status_code=400, detail="Failed to load image")
+
+        img_rgb = io_image.bgr_to_rgb(img_bgr)
+        face_boxes = detector_mediapipe.detect_faces(
+            img_rgb,
+            min_detection_confidence=min_detection_confidence,
+            max_faces=max_faces,
+        )
+
+        embedder_instance = embedder.FaceRecognitionEmbedder()
+        results = []
+
+        for box in face_boxes:
+            # Match the worker's expected FaceResult interface:
+            # { embedding: number[], box: { x, y, w, h } }
+            try:
+                face_crop = io_image.crop_face_region(img_rgb, box)
+                # TTA: Average of original and mirrored
+                emb1 = embedder_instance.embed_face(face_crop)
+                emb2 = embedder_instance.embed_face(face_crop[:, ::-1])
+                embedding = (emb1 + emb2) / 2.0
+                
+                results.append({
+                    "embedding": embedding.tolist() if hasattr(embedding, "tolist") else list(embedding),
+                    "box": {"x": box.x, "y": box.y, "w": box.w, "h": box.h}
+                })
+            except Exception as e:
+                log.warning("facet-embedding-failed", error=str(e))
+                continue
+
+        log.info("embed-face", num_faces=len(results))
+        return JSONResponse(content={"faces": results})
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.error("embed-face failed", error=str(e))
+        raise HTTPException(status_code=500, detail=f"Error embedding faces: {str(e)}")
+
+
 @app.post("/match-face")
 async def match_face(
     reference: UploadFile = File(...),
     target: UploadFile = File(...),
-    tolerance: float = 0.6,
+    tolerance: float = 0.55,
+    min_area_ratio: float = 0.15,
 ):
-    """Match faces between two images.
-
+    """Match faces with SOTA Dynamic Tolerance and TTA.
+    
     Args:
-        reference: Reference image with the face to match
-        target: Target image to search for the face
-        tolerance: Maximum Euclidean distance to consider a match (lower = stricter)
-
-    Returns:
-        JSON with match result and distance
+        reference: Reference image
+        target: Target image
+        tolerance: Base tolerance (default 0.52)
+        min_area_ratio: Min ratio to largest face (default 0.15)
     """
     log = structlog.get_logger()
     try:
@@ -118,7 +175,10 @@ async def match_face(
         ref_crop = io_image.crop_face_region(ref_rgb, ref_box)
 
         embedder_instance = embedder.FaceRecognitionEmbedder()
-        ref_embedding = embedder_instance.embed_face(ref_crop)
+        # Reference TTA
+        emb_ref1 = embedder_instance.embed_face(ref_crop)
+        emb_ref2 = embedder_instance.embed_face(ref_crop[:, ::-1])
+        ref_embedding = (emb_ref1 + emb_ref2) / 2.0
 
         target_bytes = await target.read()
         target_bgr = io_image.load_image_from_bytes(target_bytes)
@@ -127,18 +187,34 @@ async def match_face(
         target_rgb = io_image.bgr_to_rgb(target_bgr)
 
         target_boxes = detector_mediapipe.detect_faces(target_rgb)
+        if not target_boxes:
+             return JSONResponse(content={"matched": False, "best_distance": 1.0, "num_faces": 0})
 
+        largest_area = max(box.area for box in target_boxes)
         best_distance = float("inf")
         matched = False
 
         for box in target_boxes:
+            # Area Filtering (SOTA Crowd-Proofing)
+            if box.area < (largest_area * min_area_ratio):
+                continue
+                
             target_crop = io_image.crop_face_region(target_rgb, box)
             try:
-                target_embedding = embedder_instance.embed_face(target_crop)
+                # Target TTA
+                emb_t1 = embedder_instance.embed_face(target_crop)
+                emb_t2 = embedder_instance.embed_face(target_crop[:, ::-1])
+                target_embedding = (emb_t1 + emb_t2) / 2.0
+                
                 distance = embedder.euclidean_distance(ref_embedding, target_embedding)
+                
+                # If area_ratio=1.0 (Main Subject), tolerance is full.
+                # If area_ratio=0.15 (Crowd), tolerance drops significantly (by up to 0.25).
+                effective_tolerance = tolerance - (1.0 - area_ratio) * 0.25
+                
                 if distance < best_distance:
                     best_distance = distance
-                if distance <= tolerance:
+                if distance <= effective_tolerance:
                     matched = True
             except Exception:
                 continue

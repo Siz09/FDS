@@ -69,9 +69,10 @@ class FaceRecognitionEmbedder:
             )
             return encs[0] if encs else None
 
-        # Simple 1-crop if low jitters (up to 25)
-        if self._num_jitters <= 25:
-            e = get_encoding(rgb_face, self._num_jitters)
+        # Multi-Crop Strategy (TTA) always active if any jitters requested.
+        # This ensures Mirrors are always averaged for SOTA stability.
+        if self._num_jitters < 1:
+            e = get_encoding(rgb_face, 0)
             if e is None: raise ValueError("No face encoding")
             return np.array(e, dtype=np.float64)
 
@@ -99,6 +100,10 @@ class FaceRecognitionEmbedder:
         return 128
 
 
-def euclidean_distance(a: np.ndarray, b: np.ndarray) -> float:
-    """Euclidean distance between two embedding vectors (L2)."""
-    return float(np.linalg.norm(a - b))
+def euclidean_distance(a: np.ndarray | list, b: np.ndarray | list) -> float:
+    """Euclidean distance between two embedding vectors (L2).
+    Automatically handles lists by casting to numpy arrays.
+    """
+    a_arr = np.asanyarray(a)
+    b_arr = np.asanyarray(b)
+    return float(np.linalg.norm(a_arr - b_arr))

@@ -46,9 +46,9 @@ export function Dashboard() {
   >("normal");
 
   const strictnessTolerance: Record<string, number> = {
-    strict: 0.49,
-    normal: 0.51,
-    loose: 0.55,
+    strict: 0.50,
+    normal: 0.55,
+    loose: 0.60,
   };
 
   const [galleryStatus, setGalleryStatus] =

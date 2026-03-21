@@ -11,7 +11,8 @@ const REPORT_PATH = path.join(ROOT, "out", "report.json");
 
 const DEFAULT_TOLERANCE = 0.6;
 const MIN_DETECTION_CONFIDENCE = 0.3;
-const NUM_JITTERS = 25; // Balanced "Google-Grade" Precision + Speed
+const ENROLL_JITTERS = 100; // Deep-Jittering for Reference Embedding
+const SCAN_JITTERS = 25; // Balanced Scan Speed (Now with Mirror TTA)
 
 const isWin = process.platform === "win32";
 const VENV_PYTHON = isWin
@@ -34,7 +35,7 @@ function runEnroll(): Promise<void> {
                 "--min-detection-confidence",
                 String(MIN_DETECTION_CONFIDENCE),
                 "--num-jitters",
-                String(NUM_JITTERS),
+                String(ENROLL_JITTERS),
             ],
             { cwd: ROOT, shell: false } // 'shell: false' is safer with direct executable path
         );
@@ -72,7 +73,7 @@ function runFindPerson(tolerance: number): Promise<void> {
                 "--min-detection-confidence",
                 String(MIN_DETECTION_CONFIDENCE),
                 "--num-jitters",
-                String(NUM_JITTERS),
+                String(SCAN_JITTERS),
                 "--report",
                 REPORT_PATH,
             ],
