@@ -113,6 +113,23 @@ async def embed_face(
             max_faces=max_faces,
         )
 
+        if not face_boxes:
+             return JSONResponse(content={"faces": []})
+
+        # SOTA Subject Filtering: Only keep faces > 15% of largest 
+        # AND at least 0.5% of the total image area (prevents background crowd indexing)
+        total_pixels = img_rgb.shape[0] * img_rgb.shape[1]
+        largest_area = max(b.area for b in face_boxes)
+        
+        filtered_boxes = []
+        for b in face_boxes:
+            is_prominent = b.area >= (largest_area * 0.15)
+            is_not_tiny = b.area >= (total_pixels * 0.005) # 0.5% of image (approx 100x100 on 2MP)
+            if is_prominent and is_not_tiny:
+                filtered_boxes.append(b)
+        
+        face_boxes = sorted(filtered_boxes, key=lambda b: b.area, reverse=True)
+
         embedder_instance = embedder.FaceRecognitionEmbedder()
         results = []
 

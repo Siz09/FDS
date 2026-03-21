@@ -22,9 +22,8 @@ from app.vault import FaceVault
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 
-def process_single_image(image_path: Path, ref_embedding: list[float], num_jitters: int, tolerance: float, min_detection_confidence: float):
+def process_single_image(image_path: Path, ref_embedding: list[float], num_jitters: int, tolerance: float, min_detection_confidence: float, params: dict):
     """Worker function for parallel processing with Vault (Indexing) support."""
-    params = {"jitters": num_jitters, "confidence": min_detection_confidence, "model": "large"}
     try:
         # 1. Check Vault (Instant Skip)
         vault = FaceVault()
@@ -134,12 +133,19 @@ def main():
 
     print(f"Searching for {args.name} in {len(image_paths)} images (Cores: {args.cores})...")
     start_time = time.time()
-    
     report_entries = []
     matches = []
 
+    # Important: Include THE PENALTY in the cache params so change in logic invalidates cache
+    params = {
+        "tolerance": args.tolerance,
+        "jitters": args.jitters,
+        "min_detection_confidence": args.min_detection_confidence,
+        "dynamic_penalty": 0.25 # Current "Crowd-Crusher" constant
+    }
+        
     with ProcessPoolExecutor(max_workers=args.cores) as executor:
-        futures = [executor.submit(process_single_image, p, ref_embedding, args.jitters, args.tolerance, args.min_detection_confidence) for p in image_paths]
+        futures = [executor.submit(process_single_image, p, ref_embedding, args.jitters, args.tolerance, args.min_detection_confidence, params) for p in image_paths]
         for future in as_completed(futures):
             res = future.result()
             if "error" in res:
