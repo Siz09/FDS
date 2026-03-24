@@ -41,4 +41,6 @@ RUN mkdir -p data/mixed out known
 EXPOSE 8000
 
 # Start application
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# 4 worker processes — bypasses Python GIL for CPU-heavy embedding/HOG work (~2 GB RSS).
+# Low-memory fallback: uvicorn app.main:app --host 0.0.0.0 --port 8000  (~512 MB RSS)
+CMD ["gunicorn", "app.main:app", "-w", "4", "-k", "uvicorn.workers.UvicornWorker", "--bind", "0.0.0.0:8000"]

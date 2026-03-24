@@ -72,8 +72,14 @@ mkdir -p data/mixed known out
 From `python/face-service/` with your venv activated:
 
 ```bash
+# Production (4 worker processes, bypasses Python GIL):
+gunicorn app.main:app -w 4 -k uvicorn.workers.UvicornWorker --bind 0.0.0.0:8000
+
+# Low-memory fallback (single process, ~512 MB RSS):
 uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
+
+> **Memory:** Gunicorn with 4 workers uses ~4× the memory of single uvicorn (~2 GB RSS). Verify available RAM first.
 
 - **Health**: [http://localhost:8000/health](http://localhost:8000/health)
 - **OpenAPI**: [http://localhost:8000/docs](http://localhost:8000/docs)

@@ -9,6 +9,7 @@ from fastapi.responses import JSONResponse
 import os
 from app import detector_mediapipe, io_image
 from app import embedder
+import app.stats as _stats_mod
 from app.logging_config import setup_logging
 from app.middleware import RequestLoggingMiddleware, APIKeyMiddleware
 
@@ -39,8 +40,15 @@ async def health_check():
         "status": "ok",
         "service": "face-service",
         "version": "0.1.0",
-        "uptime": round(time.time() - _startup_time, 2),
+        "uptime_s": round(time.time() - _startup_time, 2),
     }
+
+
+@app.get("/stats")
+async def get_stats():
+    """Per-process performance stats. Under Gunicorn, each worker has its own instance.
+    Check system.pid to identify which worker responded."""
+    return _stats_mod.stats.get_snapshot()
 
 
 @app.post("/detect-face")
@@ -60,6 +68,9 @@ async def detect_face(
         JSON with list of detected face bounding boxes
     """
     log = structlog.get_logger()
+    t0 = time.time()
+    error = False
+    num_faces = 0
     try:
         image_bytes = await image.read()
         img_bgr = io_image.load_image_from_bytes(image_bytes)
@@ -79,14 +90,18 @@ async def detect_face(
             for box in face_boxes
         ]
 
-        log.info("detect-face", num_faces=len(face_boxes))
-        return JSONResponse(content={"num_faces": len(face_boxes), "faces": result})
+        num_faces = len(face_boxes)
+        log.info("detect-face", num_faces=num_faces)
+        return JSONResponse(content={"num_faces": num_faces, "faces": result})
 
     except HTTPException:
         raise
     except Exception as e:
+        error = True
         log.error("detect-face failed", error=str(e))
         raise HTTPException(status_code=500, detail=f"Error processing image: {str(e)}")
+    finally:
+        _stats_mod.stats.record("detect_face", latency_ms=(time.time() - t0) * 1000, num_faces=num_faces, error=error)
 
 
 @app.post("/embed-face")
@@ -99,6 +114,9 @@ async def embed_face(
     Required by SEG workers for background matching.
     """
     log = structlog.get_logger()
+    t0 = time.time()
+    error = False
+    num_faces = 0
     try:
         image_bytes = await image.read()
         img_bgr = io_image.load_image_from_bytes(image_bytes)
@@ -151,14 +169,18 @@ async def embed_face(
                 log.warning("facet-embedding-failed", error=str(e))
                 continue
 
-        log.info("embed-face", num_faces=len(results))
+        num_faces = len(results)
+        log.info("embed-face", num_faces=num_faces)
         return JSONResponse(content={"faces": results})
 
     except HTTPException:
         raise
     except Exception as e:
+        error = True
         log.error("embed-face failed", error=str(e))
         raise HTTPException(status_code=500, detail=f"Error embedding faces: {str(e)}")
+    finally:
+        _stats_mod.stats.record("embed_face", latency_ms=(time.time() - t0) * 1000, num_faces=num_faces, error=error)
 
 
 @app.post("/match-face")
@@ -177,6 +199,9 @@ async def match_face(
         min_area_ratio: Min ratio to largest face (default 0.15)
     """
     log = structlog.get_logger()
+    t0 = time.time()
+    error = False
+    num_faces = 0
     try:
         ref_bytes = await reference.read()
         ref_bgr = io_image.load_image_from_bytes(ref_bytes)
@@ -204,6 +229,7 @@ async def match_face(
         target_rgb = io_image.bgr_to_rgb(target_bgr)
 
         target_boxes = detector_mediapipe.detect_faces(target_rgb)
+        num_faces = len(target_boxes)
         if not target_boxes:
              return JSONResponse(content={"matched": False, "best_distance": 1.0, "num_faces": 0})
 
@@ -224,9 +250,7 @@ async def match_face(
                 target_embedding = (emb_t1 + emb_t2) / 2.0
                 
                 distance = embedder.euclidean_distance(ref_embedding, target_embedding)
-                
-                # If area_ratio=1.0 (Main Subject), tolerance is full.
-                # If area_ratio=0.15 (Crowd), tolerance drops significantly (by up to 0.25).
+                area_ratio = box.area / largest_area
                 effective_tolerance = tolerance - (1.0 - area_ratio) * 0.25
                 
                 if distance < best_distance:
@@ -247,5 +271,8 @@ async def match_face(
     except HTTPException:
         raise
     except Exception as e:
+        error = True
         log.error("match-face failed", error=str(e))
         raise HTTPException(status_code=500, detail=f"Error matching faces: {str(e)}")
+    finally:
+        _stats_mod.stats.record("match_face", latency_ms=(time.time() - t0) * 1000, num_faces=num_faces, error=error)
