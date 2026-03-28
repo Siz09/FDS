@@ -45,17 +45,31 @@ def _get_model_path() -> Path:
     return path
 
 
+_detector: "FaceDetector | None" = None  # set in lifespan only, never at import time
+
+
+def _get_detector() -> "FaceDetector":
+    """Return the process-level MediaPipe detector singleton (confidence=0.3)."""
+    global _detector
+    if _detector is None:
+        model_path = _get_model_path()
+        options = FaceDetectorOptions(
+            base_options=base_options_module.BaseOptions(model_asset_path=str(model_path)),
+            min_detection_confidence=0.3,
+        )
+        _detector = FaceDetector.create_from_options(options)
+    return _detector
+
+
 def detect_faces(
     rgb_image: np.ndarray,
-    min_detection_confidence: float = 0.5,
-    model_selection: int = 1,
+    model_selection: int = 1,   # kept for call-site compatibility, unused
     max_faces: int = 10,
 ) -> List[FaceBox]:
     """Detect faces in an RGB image using MediaPipe Face Detector (Tasks API).
 
     Args:
         rgb_image: Image in RGB (H, W, 3), uint8.
-        min_detection_confidence: Minimum confidence [0, 1] for a detection.
         model_selection: Ignored (Tasks API uses short-range model only for now).
         max_faces: Maximum number of faces to return (by confidence order).
 
@@ -65,23 +79,12 @@ def detect_faces(
     if rgb_image is None or rgb_image.size == 0:
         return []
 
-    model_path = _get_model_path()
-    base_options = base_options_module.BaseOptions(
-        model_asset_path=str(model_path)
-    )
-    options = FaceDetectorOptions(
-        base_options=base_options,
-        min_detection_confidence=min_detection_confidence,
-    )
-    detector = FaceDetector.create_from_options(options)
-    try:
-        # MediaPipe Image from numpy RGB (contiguous uint8).
-        if not rgb_image.flags.c_contiguous:
-            rgb_image = np.ascontiguousarray(rgb_image)
-        mp_image = Image(ImageFormat.SRGB, rgb_image)
-        result = detector.detect(mp_image)
-    finally:
-        detector.close()
+    detector = _get_detector()
+    # MediaPipe Image from numpy RGB (contiguous uint8).
+    if not rgb_image.flags.c_contiguous:
+        rgb_image = np.ascontiguousarray(rgb_image)
+    mp_image = Image(ImageFormat.SRGB, rgb_image)
+    result = detector.detect(mp_image)
 
     # 1. Start with MediaPipe detections
     mp_boxes: List[FaceBox] = []

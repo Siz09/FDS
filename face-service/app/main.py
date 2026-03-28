@@ -16,6 +16,15 @@ from app.middleware import RequestLoggingMiddleware, APIKeyMiddleware
 _startup_time: float = 0.0
 FACE_SERVICE_API_KEY = os.getenv("FACE_SERVICE_API_KEY")
 
+_embedder: "embedder.FaceRecognitionEmbedder | None" = None
+
+
+def _get_embedder() -> "embedder.FaceRecognitionEmbedder":
+    global _embedder
+    if _embedder is None:
+        _embedder = embedder.FaceRecognitionEmbedder()
+    return _embedder
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -23,7 +32,12 @@ async def lifespan(app: FastAPI):
     setup_logging()
     log = structlog.get_logger()
     _startup_time = time.time()
-    log.info("face-service started", version="0.1.0")
+
+    # Pre-warm singletons so the first real request pays no init cost.
+    # These calls run after gunicorn fork — safe for TFLite and dlib.
+    detector_mediapipe._get_detector()   # loads MediaPipe TFLite model
+    _get_embedder()                      # triggers face_recognition lazy model load
+    log.info("face-service started — models pre-warmed", version="0.1.0")
     yield
     log.info("face-service shutting down")
 
@@ -81,7 +95,6 @@ async def detect_face(
         img_rgb = io_image.bgr_to_rgb(img_bgr)
         face_boxes = detector_mediapipe.detect_faces(
             img_rgb,
-            min_detection_confidence=min_detection_confidence,
             max_faces=max_faces,
         )
 
@@ -107,7 +120,6 @@ async def detect_face(
 @app.post("/embed-face")
 async def embed_face(
     image: UploadFile = File(...),
-    min_detection_confidence: float = 0.3,
     max_faces: int = 20,
 ):
     """Detect faces and return raw 128-d embeddings.
@@ -127,7 +139,6 @@ async def embed_face(
         img_rgb = io_image.bgr_to_rgb(img_bgr)
         face_boxes = detector_mediapipe.detect_faces(
             img_rgb,
-            min_detection_confidence=min_detection_confidence,
             max_faces=max_faces,
         )
 
@@ -148,7 +159,7 @@ async def embed_face(
         
         face_boxes = sorted(filtered_boxes, key=lambda b: b.area, reverse=True)
 
-        embedder_instance = embedder.FaceRecognitionEmbedder()
+        embedder_instance = _get_embedder()
         results = []
 
         for box in face_boxes:
@@ -216,7 +227,7 @@ async def match_face(
         ref_box = detector_mediapipe.get_largest_face(ref_boxes)
         ref_crop = io_image.crop_face_region(ref_rgb, ref_box)
 
-        embedder_instance = embedder.FaceRecognitionEmbedder()
+        embedder_instance = _get_embedder()
         # Reference TTA
         emb_ref1 = embedder_instance.embed_face(ref_crop)
         emb_ref2 = embedder_instance.embed_face(ref_crop[:, ::-1])
