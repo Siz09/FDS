@@ -72,8 +72,8 @@ mkdir -p data/mixed known out
 From `python/face-service/` with your venv activated:
 
 ```bash
-# Production (4 worker processes, bypasses Python GIL):
-gunicorn app.main:app -w 4 -k uvicorn.workers.UvicornWorker --bind 0.0.0.0:8000
+# Production (4 worker processes, 1 vCPU each via OPENBLAS_NUM_THREADS=1, ~2 GB RSS):
+OPENBLAS_NUM_THREADS=1 gunicorn app.main:app -w 4 -k uvicorn_worker.UvicornWorker --bind 0.0.0.0:8000
 
 # Low-memory fallback (single process, ~512 MB RSS):
 uvicorn app.main:app --host 0.0.0.0 --port 8000

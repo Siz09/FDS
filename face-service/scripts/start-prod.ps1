@@ -16,6 +16,8 @@ if ($freeRamMB -lt 2048) {
     Start-Sleep -Seconds 3
 }
 
-Write-Host "Starting face-service with 4 Gunicorn workers..." -ForegroundColor Green
+$workers = if ($env:FACE_SERVICE_WORKERS) { $env:FACE_SERVICE_WORKERS } else { 4 }
+Write-Host "Starting face-service with $workers Gunicorn workers (OPENBLAS_NUM_THREADS=1)..." -ForegroundColor Green
+$env:OPENBLAS_NUM_THREADS = "1"
 .venv\Scripts\activate
-gunicorn app.main:app -w 4 -k uvicorn.workers.UvicornWorker --bind 0.0.0.0:8000
+gunicorn app.main:app -w $workers -k uvicorn_worker.UvicornWorker --bind 0.0.0.0:8000
