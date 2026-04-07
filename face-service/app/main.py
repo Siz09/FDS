@@ -16,8 +16,12 @@ from app.logging_config import setup_logging
 from app.middleware import RequestLoggingMiddleware, APIKeyMiddleware
 
 # Thread pool for running blocking dlib calls without blocking the event loop.
-# Size matches gunicorn worker concurrency (default 4); each request uses 2 threads (TTA pair).
-_THREAD_POOL = ThreadPoolExecutor(max_workers=int(os.getenv("EMBED_THREAD_WORKERS", "8")))
+# Size is 1 per gunicorn worker process: dlib is CPU-bound, so running TTA halves
+# concurrently within one worker under multi-job load causes thread contention and
+# slows all requests. With 1 thread, TTA runs sequentially within the worker but
+# multiple gunicorn workers still handle concurrent requests in parallel without
+# competing. Set EMBED_THREAD_WORKERS=2 only on machines with spare CPU cores.
+_THREAD_POOL = ThreadPoolExecutor(max_workers=int(os.getenv("EMBED_THREAD_WORKERS", "1")))
 
 _startup_time: float = 0.0
 FACE_SERVICE_API_KEY = os.getenv("FACE_SERVICE_API_KEY")
