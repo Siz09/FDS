@@ -1,6 +1,8 @@
 """FastAPI entry point for face detection and matching service."""
+import asyncio
 import time
 from contextlib import asynccontextmanager
+from concurrent.futures import ThreadPoolExecutor
 
 import structlog
 from fastapi import FastAPI, File, UploadFile, HTTPException
@@ -12,6 +14,10 @@ from app import embedder
 import app.stats as _stats_mod
 from app.logging_config import setup_logging
 from app.middleware import RequestLoggingMiddleware, APIKeyMiddleware
+
+# Thread pool for running blocking dlib calls without blocking the event loop.
+# Size matches gunicorn worker concurrency (default 4); each request uses 2 threads (TTA pair).
+_THREAD_POOL = ThreadPoolExecutor(max_workers=int(os.getenv("EMBED_THREAD_WORKERS", "8")))
 
 _startup_time: float = 0.0
 FACE_SERVICE_API_KEY = os.getenv("FACE_SERVICE_API_KEY")
@@ -160,25 +166,34 @@ async def embed_face(
         face_boxes = sorted(filtered_boxes, key=lambda b: b.area, reverse=True)
 
         embedder_instance = _get_embedder()
-        results = []
+        loop = asyncio.get_running_loop()
 
-        for box in face_boxes:
-            # Match the worker's expected FaceResult interface:
-            # { embedding: number[], box: { x, y, w, h } }
-            try:
-                face_crop = io_image.crop_face_region(img_rgb, box)
-                # TTA: Average of original and mirrored
-                emb1 = embedder_instance.embed_face(face_crop)
-                emb2 = embedder_instance.embed_face(face_crop[:, ::-1])
-                embedding = (emb1 + emb2) / 2.0
-                
-                results.append({
-                    "embedding": embedding.tolist() if hasattr(embedding, "tolist") else list(embedding),
-                    "box": {"x": box.x, "y": box.y, "w": box.w, "h": box.h}
-                })
-            except Exception as e:
-                log.warning("facet-embedding-failed", error=str(e))
+        async def _embed_box(box):
+            face_crop = io_image.crop_face_region(img_rgb, box)
+            # Run both TTA halves concurrently in the thread pool so the event
+            # loop stays responsive while dlib is busy.
+            emb1, emb2 = await asyncio.gather(
+                loop.run_in_executor(_THREAD_POOL, embedder_instance.embed_face, face_crop),
+                loop.run_in_executor(_THREAD_POOL, embedder_instance.embed_face, face_crop[:, ::-1]),
+            )
+            return (emb1 + emb2) / 2.0, box
+
+        # Process all faces concurrently (each face gets its own TTA pair).
+        face_tasks = await asyncio.gather(
+            *[_embed_box(box) for box in face_boxes],
+            return_exceptions=True,
+        )
+
+        results = []
+        for outcome in face_tasks:
+            if isinstance(outcome, Exception):
+                log.warning("face-embedding-failed", error=str(outcome))
                 continue
+            embedding, box = outcome
+            results.append({
+                "embedding": embedding.tolist() if hasattr(embedding, "tolist") else list(embedding),
+                "box": {"x": box.x, "y": box.y, "w": box.w, "h": box.h},
+            })
 
         num_faces = len(results)
         log.info("embed-face", num_faces=num_faces)
