@@ -155,18 +155,11 @@ async def embed_face(
         if not face_boxes:
              return JSONResponse(content={"faces": []})
 
-        # SOTA Subject Filtering: Only keep faces > 15% of largest 
-        # AND at least 0.5% of the total image area (prevents background crowd indexing)
-        total_pixels = img_rgb.shape[0] * img_rgb.shape[1]
-        largest_area = max(b.area for b in face_boxes)
-        
-        filtered_boxes = []
-        for b in face_boxes:
-            is_prominent = b.area >= (largest_area * 0.15)
-            is_not_tiny = b.area >= (total_pixels * 0.005) # 0.5% of image (approx 100x100 on 2MP)
-            if is_prominent and is_not_tiny:
-                filtered_boxes.append(b)
-        
+        # Absolute minimum: face must be at least 30x30 px to yield a usable embedding.
+        # A relative filter (% of largest face) was dropping legitimate guest faces in
+        # group shots whenever a larger face appeared elsewhere in the frame.
+        filtered_boxes = [b for b in face_boxes if b.w >= 30 and b.h >= 30]
+
         face_boxes = sorted(filtered_boxes, key=lambda b: b.area, reverse=True)
 
         embedder_instance = _get_embedder()

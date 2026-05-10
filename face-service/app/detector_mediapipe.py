@@ -86,24 +86,29 @@ def detect_faces(
     mp_image = Image(ImageFormat.SRGB, rgb_image)
     result = detector.detect(mp_image)
 
-    # 1. Start with MediaPipe detections
+    img_h, img_w = rgb_image.shape[:2]
+
+    # MediaPipe detections only — HOG fallback removed (produced noisy crops).
     mp_boxes: List[FaceBox] = []
     if result.detections:
         for det in result.detections[:max_faces]:
             bbox = det.bounding_box
             x, y, w, h = bbox.origin_x, bbox.origin_y, bbox.width, bbox.height
             if w > 0 and h > 0:
-                mp_boxes.append(FaceBox(x=x, y=y, w=w, h=h))
+                eye_left = None
+                eye_right = None
+                if det.keypoints and len(det.keypoints) >= 2:
+                    kp0 = det.keypoints[0]
+                    kp1 = det.keypoints[1]
+                    pt0 = (int(kp0.x * img_w), int(kp0.y * img_h))
+                    pt1 = (int(kp1.x * img_w), int(kp1.y * img_h))
+                    # Assign left/right based on x-coordinate in image
+                    if pt0[0] < pt1[0]:
+                        eye_left, eye_right = pt0, pt1
+                    else:
+                        eye_left, eye_right = pt1, pt0
 
-    # 2. Add HOG detections with upsampling (finds smaller faces)
-    try:
-        import face_recognition
-        # upsample=1 finds faces that are 2x smaller than default
-        hog_locations = face_recognition.face_locations(rgb_image, model="hog", number_of_times_to_upsample=1)
-        for (top, right, bottom, left) in hog_locations:
-            mp_boxes.append(FaceBox(x=left, y=top, w=right - left, h=bottom - top))
-    except Exception:
-        pass
+                mp_boxes.append(FaceBox(x=x, y=y, w=w, h=h, eye_left=eye_left, eye_right=eye_right))
 
     if not mp_boxes:
         return []

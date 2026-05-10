@@ -12,6 +12,8 @@ class FaceBox:
     y: int  # top
     w: int  # width
     h: int  # height
+    eye_left: Optional[tuple[int, int]] = None  # (x, y) in pixel coords
+    eye_right: Optional[tuple[int, int]] = None  # (x, y) in pixel coords
 
     @property
     def area(self) -> int:

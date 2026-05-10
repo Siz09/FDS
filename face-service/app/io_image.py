@@ -59,6 +59,49 @@ def crop_face_region(
         Cropped patch (same color order as input).
     """
     h_img, w_img = image.shape[:2]
+
+    if bbox.eye_left and bbox.eye_right:
+        dy = bbox.eye_right[1] - bbox.eye_left[1]
+        dx = bbox.eye_right[0] - bbox.eye_left[0]
+        angle = np.degrees(np.arctan2(dy, dx))
+        
+        # Only align if tilted > 3 degrees
+        if abs(angle) > 3.0:
+            # Safe padding for rotation (to avoid black corners)
+            diag = np.sqrt(bbox.w**2 + bbox.h**2)
+            safe_pad_w = int((diag - bbox.w) / 2 + bbox.w * pad_fraction)
+            safe_pad_h = int((diag - bbox.h) / 2 + bbox.h * pad_fraction)
+            
+            x1_safe = max(0, bbox.x - safe_pad_w)
+            y1_safe = max(0, bbox.y - safe_pad_h)
+            x2_safe = min(w_img, bbox.x + bbox.w + safe_pad_w)
+            y2_safe = min(h_img, bbox.y + bbox.h + safe_pad_h)
+            
+            safe_crop = image[y1_safe:y2_safe, x1_safe:x2_safe]
+            
+            # Center of the face relative to the safe crop
+            center_x = (bbox.x + bbox.w / 2.0) - x1_safe
+            center_y = (bbox.y + bbox.h / 2.0) - y1_safe
+            
+            M = cv2.getRotationMatrix2D((center_x, center_y), angle, 1.0)
+            rotated_crop = cv2.warpAffine(
+                safe_crop, M, (safe_crop.shape[1], safe_crop.shape[0]), 
+                flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE
+            )
+            
+            # Now extract the final padded face from the rotated safe crop
+            pad_w = int(bbox.w * pad_fraction)
+            pad_h = int(bbox.h * pad_fraction)
+            
+            rx1 = max(0, int(center_x - bbox.w / 2.0 - pad_w))
+            ry1 = max(0, int(center_y - bbox.h / 2.0 - pad_h))
+            rx2 = min(rotated_crop.shape[1], int(center_x + bbox.w / 2.0 + pad_w))
+            ry2 = min(rotated_crop.shape[0], int(center_y + bbox.h / 2.0 + pad_h))
+            
+            if rx2 > rx1 and ry2 > ry1:
+                return rotated_crop[ry1:ry2, rx1:rx2].copy()
+
+    # Standard unrotated crop (fallback)
     pad_w = max(0, int(bbox.w * pad_fraction))
     pad_h = max(0, int(bbox.h * pad_fraction))
     x1 = max(0, bbox.x - pad_w)
