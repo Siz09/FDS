@@ -10,30 +10,18 @@ from fastapi.responses import JSONResponse
 
 import os
 from app import detector_mediapipe, io_image
-from app import embedder
+from app.sota_onnx import get_arcface_embedder, align_face_5pt, cosine_similarity
 import app.stats as _stats_mod
 from app.logging_config import setup_logging
 from app.middleware import RequestLoggingMiddleware, APIKeyMiddleware
 
-# Thread pool for running blocking dlib calls without blocking the event loop.
-# Size is 1 per gunicorn worker process: dlib is CPU-bound, so running TTA halves
-# concurrently within one worker under multi-job load causes thread contention and
-# slows all requests. With 1 thread, TTA runs sequentially within the worker but
-# multiple gunicorn workers still handle concurrent requests in parallel without
-# competing. Set EMBED_THREAD_WORKERS=2 only on machines with spare CPU cores.
+# Thread pool for CPU-bound ArcFace ONNX inference.
+# One thread per gunicorn worker — ONNX is CPU-bound, contention hurts throughput.
+# Set EMBED_THREAD_WORKERS=2 only on machines with spare CPU cores.
 _THREAD_POOL = ThreadPoolExecutor(max_workers=int(os.getenv("EMBED_THREAD_WORKERS", "1")))
 
 _startup_time: float = 0.0
 FACE_SERVICE_API_KEY = os.getenv("FACE_SERVICE_API_KEY")
-
-_embedder: "embedder.FaceRecognitionEmbedder | None" = None
-
-
-def _get_embedder() -> "embedder.FaceRecognitionEmbedder":
-    global _embedder
-    if _embedder is None:
-        _embedder = embedder.FaceRecognitionEmbedder()
-    return _embedder
 
 
 @asynccontextmanager
@@ -44,10 +32,10 @@ async def lifespan(app: FastAPI):
     _startup_time = time.time()
 
     # Pre-warm singletons so the first real request pays no init cost.
-    # These calls run after gunicorn fork — safe for TFLite and dlib.
+    # These calls run after gunicorn fork — safe for TFLite and ONNX.
     detector_mediapipe._get_detector()   # loads MediaPipe TFLite model
-    _get_embedder()                      # triggers face_recognition lazy model load
-    log.info("face-service started — models pre-warmed", version="0.1.0")
+    get_arcface_embedder()               # downloads + loads ArcFace ONNX model
+    log.info("face-service started — models pre-warmed", version="0.2.0")
     yield
     log.info("face-service shutting down")
 
@@ -63,7 +51,7 @@ async def health_check():
     return {
         "status": "ok",
         "service": "face-service",
-        "version": "0.1.0",
+        "version": "0.2.0",
         "uptime_s": round(time.time() - _startup_time, 2),
     }
 
@@ -132,7 +120,7 @@ async def embed_face(
     image: UploadFile = File(...),
     max_faces: int = 20,
 ):
-    """Detect faces and return raw 128-d embeddings.
+    """Detect faces and return raw 512-d ArcFace embeddings.
     Required by SEG workers for background matching.
     """
     log = structlog.get_logger()
@@ -155,27 +143,30 @@ async def embed_face(
         if not face_boxes:
              return JSONResponse(content={"faces": []})
 
-        # Absolute minimum: face must be at least 30x30 px to yield a usable embedding.
-        # A relative filter (% of largest face) was dropping legitimate guest faces in
-        # group shots whenever a larger face appeared elsewhere in the frame.
-        filtered_boxes = [b for b in face_boxes if b.w >= 30 and b.h >= 30]
+        # Absolute minimum: face must be at least 60x60 px to yield a usable embedding.
+        filtered_boxes = [b for b in face_boxes if b.w >= 60 and b.h >= 60]
 
         face_boxes = sorted(filtered_boxes, key=lambda b: b.area, reverse=True)
 
-        embedder_instance = _get_embedder()
+        embedder_instance = get_arcface_embedder()
         loop = asyncio.get_running_loop()
 
         async def _embed_box(box):
-            face_crop = io_image.crop_face_region(img_rgb, box)
-            # Run both TTA halves concurrently in the thread pool so the event
-            # loop stays responsive while dlib is busy.
-            emb1, emb2 = await asyncio.gather(
-                loop.run_in_executor(_THREAD_POOL, embedder_instance.embed_face, face_crop),
-                loop.run_in_executor(_THREAD_POOL, embedder_instance.embed_face, face_crop[:, ::-1]),
-            )
-            return (emb1 + emb2) / 2.0, box
+            # Use 5-point alignment if landmarks are available, else fall back to bbox crop.
+            # Alignment is critical for ArcFace accuracy on angled/partial faces.
+            if box.landmarks:
+                face_crop = align_face_5pt(img_rgb, box.landmarks)
+                if face_crop is None:
+                    face_crop = io_image.crop_face_region(img_rgb, box)
+            else:
+                face_crop = io_image.crop_face_region(img_rgb, box)
 
-        # Process all faces concurrently (each face gets its own TTA pair).
+            embedding = await loop.run_in_executor(
+                _THREAD_POOL, embedder_instance.embed_face, face_crop
+            )
+            return embedding, box
+
+        # Process all faces concurrently (ArcFace is fast enough per face).
         face_tasks = await asyncio.gather(
             *[_embed_box(box) for box in face_boxes],
             return_exceptions=True,
@@ -210,16 +201,16 @@ async def embed_face(
 async def match_face(
     reference: UploadFile = File(...),
     target: UploadFile = File(...),
-    tolerance: float = 0.55,
+    tolerance: float = 0.40,
     min_area_ratio: float = 0.15,
 ):
-    """Match faces with SOTA Dynamic Tolerance and TTA.
-    
+    """Match faces using ArcFace cosine similarity.
+
     Args:
-        reference: Reference image
-        target: Target image
-        tolerance: Base tolerance (default 0.52)
-        min_area_ratio: Min ratio to largest face (default 0.15)
+        reference: Reference image (selfie).
+        target: Target image (event photo).
+        tolerance: Cosine similarity threshold; >= means match (default 0.40).
+        min_area_ratio: Min face area ratio to largest face (default 0.15).
     """
     log = structlog.get_logger()
     t0 = time.time()
@@ -237,13 +228,17 @@ async def match_face(
             raise HTTPException(status_code=400, detail="No face detected in reference image")
 
         ref_box = detector_mediapipe.get_largest_face(ref_boxes)
-        ref_crop = io_image.crop_face_region(ref_rgb, ref_box)
 
-        embedder_instance = _get_embedder()
-        # Reference TTA
-        emb_ref1 = embedder_instance.embed_face(ref_crop)
-        emb_ref2 = embedder_instance.embed_face(ref_crop[:, ::-1])
-        ref_embedding = (emb_ref1 + emb_ref2) / 2.0
+        # Use 5-point alignment if landmarks available, else crop from bbox.
+        if ref_box.landmarks:
+            ref_crop = align_face_5pt(ref_rgb, ref_box.landmarks)
+            if ref_crop is None:
+                ref_crop = io_image.crop_face_region(ref_rgb, ref_box)
+        else:
+            ref_crop = io_image.crop_face_region(ref_rgb, ref_box)
+
+        embedder_instance = get_arcface_embedder()
+        ref_embedding = embedder_instance.embed_face(ref_crop)
 
         target_bytes = await target.read()
         target_bgr = io_image.load_image_from_bytes(target_bytes)
@@ -254,39 +249,45 @@ async def match_face(
         target_boxes = detector_mediapipe.detect_faces(target_rgb)
         num_faces = len(target_boxes)
         if not target_boxes:
-             return JSONResponse(content={"matched": False, "best_distance": 1.0, "num_faces": 0})
+             return JSONResponse(content={
+                 "matched": False,
+                 "best_similarity": -1.0,
+                 "num_faces": 0,
+             })
 
-        largest_area = max(box.area for box in target_boxes)
-        best_distance = float("inf")
+        # ArcFace with alignment is robust to face size — no dynamic tolerance needed.
+        best_similarity = -1.0
         matched = False
 
         for box in target_boxes:
-            # Area Filtering (SOTA Crowd-Proofing)
-            if box.area < (largest_area * min_area_ratio):
+            # Absolute size filter (60x60px minimum)
+            if box.w < 60 or box.h < 60:
                 continue
-                
-            target_crop = io_image.crop_face_region(target_rgb, box)
+
+            # Use 5-point alignment if landmarks available, else crop from bbox.
+            if box.landmarks:
+                target_crop = align_face_5pt(target_rgb, box.landmarks)
+                if target_crop is None:
+                    target_crop = io_image.crop_face_region(target_rgb, box)
+            else:
+                target_crop = io_image.crop_face_region(target_rgb, box)
+
             try:
-                # Target TTA
-                emb_t1 = embedder_instance.embed_face(target_crop)
-                emb_t2 = embedder_instance.embed_face(target_crop[:, ::-1])
-                target_embedding = (emb_t1 + emb_t2) / 2.0
-                
-                distance = embedder.euclidean_distance(ref_embedding, target_embedding)
-                area_ratio = box.area / largest_area
-                effective_tolerance = tolerance - (1.0 - area_ratio) * 0.25
-                
-                if distance < best_distance:
-                    best_distance = distance
-                if distance <= effective_tolerance:
+                target_embedding = embedder_instance.embed_face(target_crop)
+                similarity = cosine_similarity(ref_embedding, target_embedding)
+
+                if similarity > best_similarity:
+                    best_similarity = similarity
+                # ArcFace cosine: higher = more similar. >= threshold means match.
+                if similarity >= tolerance:
                     matched = True
             except Exception:
                 continue
 
-        log.info("match-face", matched=matched, best_distance=best_distance, tolerance=tolerance)
+        log.info("match-face", matched=matched, best_similarity=best_similarity, tolerance=tolerance)
         return JSONResponse(content={
             "matched": matched,
-            "best_distance": best_distance,
+            "best_similarity": best_similarity,
             "tolerance": tolerance,
             "num_faces_in_target": len(target_boxes),
         })

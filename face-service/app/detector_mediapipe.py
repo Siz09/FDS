@@ -55,7 +55,7 @@ def _get_detector() -> "FaceDetector":
         model_path = _get_model_path()
         options = FaceDetectorOptions(
             base_options=base_options_module.BaseOptions(model_asset_path=str(model_path)),
-            min_detection_confidence=0.3,
+            min_detection_confidence=0.5,
         )
         _detector = FaceDetector.create_from_options(options)
     return _detector
@@ -95,20 +95,33 @@ def detect_faces(
             bbox = det.bounding_box
             x, y, w, h = bbox.origin_x, bbox.origin_y, bbox.width, bbox.height
             if w > 0 and h > 0:
-                eye_left = None
-                eye_right = None
-                if det.keypoints and len(det.keypoints) >= 2:
-                    kp0 = det.keypoints[0]
-                    kp1 = det.keypoints[1]
-                    pt0 = (int(kp0.x * img_w), int(kp0.y * img_h))
-                    pt1 = (int(kp1.x * img_w), int(kp1.y * img_h))
-                    # Assign left/right based on x-coordinate in image
+                eye_left = eye_right = nose = mouth_left = mouth_right = None
+                if det.keypoints and len(det.keypoints) >= 5:
+                    def kp(i: int) -> tuple[int, int]:
+                        return (int(det.keypoints[i].x * img_w), int(det.keypoints[i].y * img_h))
+                    pt0, pt1 = kp(0), kp(1)
+                    # MediaPipe kp[0]=right-eye from model POV = leftmost in image; confirm by x.
+                    if pt0[0] < pt1[0]:
+                        eye_left, eye_right = pt0, pt1
+                    else:
+                        eye_left, eye_right = pt1, pt0
+                    nose = kp(2)
+                    mouth_left = kp(3)
+                    mouth_right = kp(4)
+                elif det.keypoints and len(det.keypoints) >= 2:
+                    # Fallback: old short-range model only returns 2 kp
+                    pt0 = (int(det.keypoints[0].x * img_w), int(det.keypoints[0].y * img_h))
+                    pt1 = (int(det.keypoints[1].x * img_w), int(det.keypoints[1].y * img_h))
                     if pt0[0] < pt1[0]:
                         eye_left, eye_right = pt0, pt1
                     else:
                         eye_left, eye_right = pt1, pt0
 
-                mp_boxes.append(FaceBox(x=x, y=y, w=w, h=h, eye_left=eye_left, eye_right=eye_right))
+                mp_boxes.append(FaceBox(
+                    x=x, y=y, w=w, h=h,
+                    eye_left=eye_left, eye_right=eye_right,
+                    nose=nose, mouth_left=mouth_left, mouth_right=mouth_right,
+                ))
 
     if not mp_boxes:
         return []

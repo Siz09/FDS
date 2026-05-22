@@ -1,13 +1,10 @@
 FROM python:3.11-slim
 
-# Install system dependencies
+# Install system dependencies.
+# Removed: cmake, libopenblas-dev, liblapack-dev, libx11-dev, libgtk-3-dev,
+#          gfortran — all were needed only for dlib compilation.
+# Kept: OpenCV runtime deps + MediaPipe EGL requirements.
 RUN apt-get update && apt-get install -y \
-    build-essential \
-    cmake \
-    libopenblas-dev \
-    liblapack-dev \
-    libx11-dev \
-    libgtk-3-dev \
     libavcodec-dev \
     libavformat-dev \
     libswscale-dev \
@@ -17,7 +14,6 @@ RUN apt-get update && apt-get install -y \
     libjpeg-dev \
     libpng-dev \
     libtiff-dev \
-    gfortran \
     pkg-config \
     python3-dev \
     libegl1 \
@@ -27,10 +23,6 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /app
 
-# Cap OpenBLAS to 1 thread per worker so N workers use exactly N vCPUs cleanly.
-# Without this, each worker tries to grab all cores → contention on multi-worker setups.
-ENV OPENBLAS_NUM_THREADS=1
-
 # Install Python dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
@@ -39,14 +31,12 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
 # Ensure data directories exist
-RUN mkdir -p data/mixed out known
+RUN mkdir -p data/mixed out known models
 
 # Expose FastAPI port
 EXPOSE 8000
 
 # Start application
-# 4 worker processes — 1 vCPU each (OPENBLAS_NUM_THREADS=1), ~500 MB RSS each (~2 GB total).
+# 4 worker processes — 1 vCPU each, ~300 MB RSS each (~1.2 GB total, down from ~2 GB with dlib).
 # Worker count is controlled by FACE_SERVICE_WORKERS env var (default 4).
-# Must match WORKER_CONCURRENCY in Node workers to avoid fetch-failed errors under load.
-# Low-memory fallback: uvicorn app.main:app --host 0.0.0.0 --port 8000  (~512 MB RSS)
 CMD gunicorn app.main:app -w ${FACE_SERVICE_WORKERS:-4} -k uvicorn_worker.UvicornWorker --bind 0.0.0.0:8000

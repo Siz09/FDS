@@ -43,12 +43,25 @@ def bgr_to_rgb(bgr: np.ndarray) -> np.ndarray:
     return cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
 
 
+def align_face(image: np.ndarray, left_eye: tuple[int, int], right_eye: tuple[int, int]) -> np.ndarray:
+    """Rotate image so eyes are level. Returns rotated full image."""
+    eye_center = ((left_eye[0] + right_eye[0]) / 2.0,
+                  (left_eye[1] + right_eye[1]) / 2.0)
+    dy = right_eye[1] - left_eye[1]
+    dx = right_eye[0] - left_eye[0]
+    angle = np.degrees(np.arctan2(dy, dx))
+    
+    M = cv2.getRotationMatrix2D(eye_center, angle, 1.0)
+    h, w = image.shape[:2]
+    return cv2.warpAffine(image, M, (w, h), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
+
+
 def crop_face_region(
     image: np.ndarray,
     bbox: FaceBox,
     pad_fraction: float = 0.2,
 ) -> np.ndarray:
-    """Crop face region with padding, clamped to image boundaries.
+    """Crop face region with padding, performing 2D alignment if eyes are detected.
 
     Args:
         image: Full image (BGR or RGB).
@@ -56,59 +69,22 @@ def crop_face_region(
         pad_fraction: Fraction of bbox size to add as padding (e.g. 0.2 = 20%).
 
     Returns:
-        Cropped patch (same color order as input).
+        Cropped and aligned patch.
     """
-    h_img, w_img = image.shape[:2]
-
+    img_to_crop = image
     if bbox.eye_left and bbox.eye_right:
-        dy = bbox.eye_right[1] - bbox.eye_left[1]
-        dx = bbox.eye_right[0] - bbox.eye_left[0]
-        angle = np.degrees(np.arctan2(dy, dx))
-        
-        # Only align if tilted > 3 degrees
-        if abs(angle) > 3.0:
-            # Safe padding for rotation (to avoid black corners)
-            diag = np.sqrt(bbox.w**2 + bbox.h**2)
-            safe_pad_w = int((diag - bbox.w) / 2 + bbox.w * pad_fraction)
-            safe_pad_h = int((diag - bbox.h) / 2 + bbox.h * pad_fraction)
-            
-            x1_safe = max(0, bbox.x - safe_pad_w)
-            y1_safe = max(0, bbox.y - safe_pad_h)
-            x2_safe = min(w_img, bbox.x + bbox.w + safe_pad_w)
-            y2_safe = min(h_img, bbox.y + bbox.h + safe_pad_h)
-            
-            safe_crop = image[y1_safe:y2_safe, x1_safe:x2_safe]
-            
-            # Center of the face relative to the safe crop
-            center_x = (bbox.x + bbox.w / 2.0) - x1_safe
-            center_y = (bbox.y + bbox.h / 2.0) - y1_safe
-            
-            M = cv2.getRotationMatrix2D((center_x, center_y), angle, 1.0)
-            rotated_crop = cv2.warpAffine(
-                safe_crop, M, (safe_crop.shape[1], safe_crop.shape[0]), 
-                flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE
-            )
-            
-            # Now extract the final padded face from the rotated safe crop
-            pad_w = int(bbox.w * pad_fraction)
-            pad_h = int(bbox.h * pad_fraction)
-            
-            rx1 = max(0, int(center_x - bbox.w / 2.0 - pad_w))
-            ry1 = max(0, int(center_y - bbox.h / 2.0 - pad_h))
-            rx2 = min(rotated_crop.shape[1], int(center_x + bbox.w / 2.0 + pad_w))
-            ry2 = min(rotated_crop.shape[0], int(center_y + bbox.h / 2.0 + pad_h))
-            
-            if rx2 > rx1 and ry2 > ry1:
-                return rotated_crop[ry1:ry2, rx1:rx2].copy()
+        img_to_crop = align_face(image, bbox.eye_left, bbox.eye_right)
 
-    # Standard unrotated crop (fallback)
+    h_img, w_img = img_to_crop.shape[:2]
     pad_w = max(0, int(bbox.w * pad_fraction))
     pad_h = max(0, int(bbox.h * pad_fraction))
+    
     x1 = max(0, bbox.x - pad_w)
     y1 = max(0, bbox.y - pad_h)
     x2 = min(w_img, bbox.x + bbox.w + pad_w)
     y2 = min(h_img, bbox.y + bbox.h + pad_h)
-    return image[y1:y2, x1:x2].copy()
+    
+    return img_to_crop[y1:y2, x1:x2].copy()
 
 
 def get_image_size(image: np.ndarray) -> Tuple[int, int]:
