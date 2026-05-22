@@ -35,7 +35,7 @@ FACE_DETECTOR_MODEL_URL = (
 
 def _get_model_path() -> Path:
     """Return path to face detector .tflite; download if missing."""
-    repo_root = Path(__file__).resolve().parent.parent.parent
+    repo_root = Path(__file__).resolve().parent.parent  # face-service/
     models_dir = repo_root / "models"
     models_dir.mkdir(exist_ok=True)
     path = models_dir / "blaze_face_full_range.tflite"

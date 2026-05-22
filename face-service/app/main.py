@@ -10,7 +10,13 @@ from fastapi.responses import JSONResponse
 
 import os
 from app import detector_mediapipe, io_image
-from app.sota_onnx import get_arcface_embedder, align_face_5pt, cosine_similarity
+from app.sota_onnx import (
+    get_arcface_embedder,
+    get_landmark_detector,
+    align_face_5pt,
+    align_face_106pt,
+    cosine_similarity,
+)
 import app.stats as _stats_mod
 from app.logging_config import setup_logging
 from app.middleware import RequestLoggingMiddleware, APIKeyMiddleware
@@ -33,8 +39,9 @@ async def lifespan(app: FastAPI):
 
     # Pre-warm singletons so the first real request pays no init cost.
     # These calls run after gunicorn fork — safe for TFLite and ONNX.
-    detector_mediapipe._get_detector()   # loads MediaPipe TFLite model
-    get_arcface_embedder()               # downloads + loads ArcFace ONNX model
+    detector_mediapipe._get_detector()   # Load MediaPipe TFLite
+    get_arcface_embedder()               # Load ArcFace ONNX (w600k_r50)
+    get_landmark_detector()              # Load 106-point landmark ONNX (2d106det)
     log.info("face-service started — models pre-warmed", version="0.2.0")
     yield
     log.info("face-service shutting down")
@@ -152,14 +159,31 @@ async def embed_face(
         loop = asyncio.get_running_loop()
 
         async def _embed_box(box):
-            # Use 5-point alignment if landmarks are available, else fall back to bbox crop.
-            # Alignment is critical for ArcFace accuracy on angled/partial faces.
-            if box.landmarks:
+            landmark_detector = get_landmark_detector()
+
+            # Try 106-point alignment first — most accurate, handles non-frontal faces.
+            lm106 = await loop.run_in_executor(
+                _THREAD_POOL, landmark_detector.get_landmarks, img_rgb, box
+            )
+            if lm106 is not None:
+                face_crop = align_face_106pt(img_rgb, lm106)
+                if face_crop is not None:
+                    log.info("align-path", path="106pt")
+                else:
+                    face_crop = align_face_5pt(img_rgb, box.landmarks) if box.landmarks else io_image.crop_face_region(img_rgb, box)
+                    log.info("align-path", path="5pt-fallback-from-106pt")
+            elif box.landmarks:
+                # 2d106det inference failed entirely — fall back to 5-point
                 face_crop = align_face_5pt(img_rgb, box.landmarks)
                 if face_crop is None:
                     face_crop = io_image.crop_face_region(img_rgb, box)
+                    log.info("align-path", path="bbox-fallback")
+                else:
+                    log.info("align-path", path="5pt")
             else:
+                # No landmarks at all — raw bbox crop as last resort
                 face_crop = io_image.crop_face_region(img_rgb, box)
+                log.info("align-path", path="bbox-only")
 
             embedding = await loop.run_in_executor(
                 _THREAD_POOL, embedder_instance.embed_face, face_crop
@@ -202,7 +226,6 @@ async def match_face(
     reference: UploadFile = File(...),
     target: UploadFile = File(...),
     tolerance: float = 0.40,
-    min_area_ratio: float = 0.15,
 ):
     """Match faces using ArcFace cosine similarity.
 
@@ -210,7 +233,6 @@ async def match_face(
         reference: Reference image (selfie).
         target: Target image (event photo).
         tolerance: Cosine similarity threshold; >= means match (default 0.40).
-        min_area_ratio: Min face area ratio to largest face (default 0.15).
     """
     log = structlog.get_logger()
     t0 = time.time()
@@ -229,8 +251,13 @@ async def match_face(
 
         ref_box = detector_mediapipe.get_largest_face(ref_boxes)
 
-        # Use 5-point alignment if landmarks available, else crop from bbox.
-        if ref_box.landmarks:
+        landmark_detector = get_landmark_detector()
+        ref_lm106 = landmark_detector.get_landmarks(ref_rgb, ref_box)
+        if ref_lm106 is not None:
+            ref_crop = align_face_106pt(ref_rgb, ref_lm106)
+            if ref_crop is None:
+                ref_crop = align_face_5pt(ref_rgb, ref_box.landmarks) if ref_box.landmarks else io_image.crop_face_region(ref_rgb, ref_box)
+        elif ref_box.landmarks:
             ref_crop = align_face_5pt(ref_rgb, ref_box.landmarks)
             if ref_crop is None:
                 ref_crop = io_image.crop_face_region(ref_rgb, ref_box)
@@ -264,8 +291,13 @@ async def match_face(
             if box.w < 60 or box.h < 60:
                 continue
 
-            # Use 5-point alignment if landmarks available, else crop from bbox.
-            if box.landmarks:
+            # 106-point landmark alignment (landmark_detector already obtained above).
+            target_lm106 = landmark_detector.get_landmarks(target_rgb, box)
+            if target_lm106 is not None:
+                target_crop = align_face_106pt(target_rgb, target_lm106)
+                if target_crop is None:
+                    target_crop = align_face_5pt(target_rgb, box.landmarks) if box.landmarks else io_image.crop_face_region(target_rgb, box)
+            elif box.landmarks:
                 target_crop = align_face_5pt(target_rgb, box.landmarks)
                 if target_crop is None:
                     target_crop = io_image.crop_face_region(target_rgb, box)
