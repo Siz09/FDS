@@ -28,10 +28,12 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application code + models directory.
-# models/w600k_r50.onnx (174 MB) must exist on the build host at this path.
+# models/w600k_r100.onnx (~260 MB) must exist on the build host at this path.
+# Upgraded from r50 (174 MB) to r100 (ResNet-100/Glint360K) for better identity separation.
 # For Hetzner: scp the file there once, then rebuilds are instant — no network.
-#   scp python/face-service/models/w600k_r50.onnx hetzner:/app/models/
-# For local dev: the file is downloaded once by _get_model_path() or manually placed.
+#   scp python/face-service/models/w600k_r100.onnx hetzner:/app/models/
+# Download: glintr100.onnx from https://github.com/deepinsight/insightface/releases (antelopev2 pack)
+# For local dev: place glintr100.onnx renamed to w600k_r100.onnx in face-service/models/ manually.
 COPY . .
 
 # Ensure runtime data directories exist
@@ -40,10 +42,10 @@ RUN mkdir -p data/mixed out known models
 # Fail the build loudly if the model file is absent — better than a silent crash at startup.
 RUN python -c "\
 from pathlib import Path; \
-p1 = Path('/app/models/w600k_r50.onnx'); \
-assert p1.exists() and p1.stat().st_size > 100_000_000, \
-    f'w600k_r50.onnx missing or too small at {p1} — place the 174 MB ONNX file in models/ before building'; \
-print(f'ArcFace model present: {p1.stat().st_size // 1_000_000} MB', flush=True); \
+p1 = Path('/app/models/w600k_r100.onnx'); \
+assert p1.exists() and p1.stat().st_size > 250_000_000, \
+    f'w600k_r100.onnx missing or too small at {p1} — place the ~260 MB ONNX file in models/ before building'; \
+print(f'ArcFace R100 model present: {p1.stat().st_size // 1_000_000} MB', flush=True); \
 p2 = Path('/app/models/2d106det.onnx'); \
 assert p2.exists() and p2.stat().st_size > 5_000_000, \
     f'2d106det.onnx missing or too small at {p2} — extract it from buffalo_l.zip and place in models/ before building'; \
