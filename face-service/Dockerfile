@@ -3,7 +3,8 @@ FROM python:3.11-slim
 # Install system dependencies.
 # Removed: cmake, libopenblas-dev, liblapack-dev, libx11-dev, libgtk-3-dev,
 #          gfortran — all were needed only for dlib compilation.
-# Kept: OpenCV runtime deps + MediaPipe EGL requirements.
+# Removed: libegl1, libgles2, libgl1 — MediaPipe EGL requirements, not needed for SCRFD.
+# Kept: OpenCV runtime deps only.
 RUN apt-get update && apt-get install -y \
     libavcodec-dev \
     libavformat-dev \
@@ -16,9 +17,6 @@ RUN apt-get update && apt-get install -y \
     libtiff-dev \
     pkg-config \
     python3-dev \
-    libegl1 \
-    libgles2 \
-    libgl1 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -28,18 +26,18 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application code + models directory.
-# models/w600k_r100.onnx (~260 MB) must exist on the build host at this path.
-# Upgraded from r50 (174 MB) to r100 (ResNet-100/Glint360K) for better identity separation.
-# For Hetzner: scp the file there once, then rebuilds are instant — no network.
-#   scp python/face-service/models/w600k_r100.onnx hetzner:/app/models/
-# Download: glintr100.onnx from https://github.com/deepinsight/insightface/releases (antelopev2 pack)
-# For local dev: place glintr100.onnx renamed to w600k_r100.onnx in face-service/models/ manually.
+# Required model files in models/ before building:
+#   w600k_r100.onnx        (~260 MB) — glintr100 from antelopev2, ArcFace R100
+#   2d106det.onnx           (~10 MB) — landmark detector from buffalo_l
+#   scrfd_10g_bnkps.onnx    (~17 MB) — SCRFD-10GF face detector from antelopev2
+# For Hetzner: scp the files there once, then rebuilds are instant — no network.
+# Download: https://github.com/deepinsight/insightface/releases (antelopev2 + buffalo_l packs)
 COPY . .
 
 # Ensure runtime data directories exist
 RUN mkdir -p data/mixed out known models
 
-# Fail the build loudly if the model file is absent — better than a silent crash at startup.
+# Fail the build loudly if any model file is absent — better than a silent crash at startup.
 RUN python -c "\
 from pathlib import Path; \
 p1 = Path('/app/models/w600k_r100.onnx'); \
@@ -49,7 +47,11 @@ print(f'ArcFace R100 model present: {p1.stat().st_size // 1_000_000} MB', flush=
 p2 = Path('/app/models/2d106det.onnx'); \
 assert p2.exists() and p2.stat().st_size > 5_000_000, \
     f'2d106det.onnx missing or too small at {p2} — extract it from buffalo_l.zip and place in models/ before building'; \
-print(f'2d106det landmark model present: {p2.stat().st_size // 1_000_000} MB', flush=True)"
+print(f'2d106det landmark model present: {p2.stat().st_size // 1_000_000} MB', flush=True); \
+p3 = Path('/app/models/scrfd_10g_bnkps.onnx'); \
+assert p3.exists() and p3.stat().st_size > 15_000_000, \
+    f'scrfd_10g_bnkps.onnx missing at {p3} — download from InsightFace antelopev2 pack'; \
+print(f'SCRFD detector model present: {p3.stat().st_size // 1_000_000} MB', flush=True)"
 
 # Expose FastAPI port
 EXPOSE 8000

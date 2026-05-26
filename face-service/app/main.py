@@ -9,7 +9,7 @@ from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.responses import JSONResponse
 
 import os
-from app import detector_mediapipe, io_image
+from app import detector_scrfd as detector, io_image
 from app.sota_onnx import (
     get_arcface_embedder,
     get_landmark_detector,
@@ -38,11 +38,11 @@ async def lifespan(app: FastAPI):
     _startup_time = time.time()
 
     # Pre-warm singletons so the first real request pays no init cost.
-    # These calls run after gunicorn fork — safe for TFLite and ONNX.
-    detector_mediapipe._get_detector()   # Load MediaPipe TFLite
-    get_arcface_embedder()               # Load ArcFace ONNX (w600k_r50)
+    # These calls run after gunicorn fork — safe for ONNX.
+    detector._get_session()              # Load SCRFD-10GF ONNX (face detection)
+    get_arcface_embedder()               # Load ArcFace ONNX (w600k_r100)
     get_landmark_detector()              # Load 106-point landmark ONNX (2d106det)
-    log.info("face-service started — models pre-warmed", version="0.2.0")
+    log.info("face-service started — models pre-warmed", version="0.3.0")
     yield
     log.info("face-service shutting down")
 
@@ -98,7 +98,7 @@ async def detect_face(
             raise HTTPException(status_code=400, detail="Failed to load image")
 
         img_rgb = io_image.bgr_to_rgb(img_bgr)
-        face_boxes = detector_mediapipe.detect_faces(
+        face_boxes = detector.detect_faces(
             img_rgb,
             max_faces=max_faces,
         )
@@ -144,7 +144,7 @@ async def embed_face(
             raise HTTPException(status_code=400, detail="Failed to load image")
 
         img_rgb = io_image.bgr_to_rgb(img_bgr)
-        face_boxes = detector_mediapipe.detect_faces(
+        face_boxes = detector.detect_faces(
             img_rgb,
             max_faces=max_faces,
         )
@@ -213,6 +213,28 @@ async def embed_face(
             _THREAD_POOL, embedder_instance.embed_batch, aligned_crops
         )
 
+        # Check for any crops with quality_score < 18.0 and queue them for fallback raw bbox crop embedding.
+        fallback_indices = []
+        fallback_crops = []
+        for i, ((embedding, quality_score), box) in enumerate(zip(embeddings, aligned_boxes)):
+            if quality_score < 18.0:
+                log.info("poor-alignment-quality", quality_score=quality_score, box_coords=(box.x, box.y, box.w, box.h))
+                fallback_crop = io_image.crop_face_region(img_rgb, box)
+                fallback_indices.append(i)
+                fallback_crops.append(fallback_crop)
+
+        if fallback_crops:
+            fallback_embeddings = await loop.run_in_executor(
+                _THREAD_POOL, embedder_instance.embed_batch, fallback_crops
+            )
+            for idx, (emb_bbox, qs_bbox) in zip(fallback_indices, fallback_embeddings):
+                orig_emb, orig_qs = embeddings[idx]
+                if qs_bbox > orig_qs:
+                    log.info("fallback-raw-bbox-selected", original_qs=orig_qs, new_qs=qs_bbox)
+                    embeddings[idx] = (emb_bbox, qs_bbox)
+                else:
+                    log.info("fallback-raw-bbox-rejected", original_qs=orig_qs, fallback_qs=qs_bbox)
+
         results = []
         for (embedding, quality_score), box in zip(embeddings, aligned_boxes):
             results.append({
@@ -259,11 +281,11 @@ async def match_face(
             raise HTTPException(status_code=400, detail="Failed to load reference image")
         ref_rgb = io_image.bgr_to_rgb(ref_bgr)
 
-        ref_boxes = detector_mediapipe.detect_faces(ref_rgb)
+        ref_boxes = detector.detect_faces(ref_rgb)
         if not ref_boxes:
             raise HTTPException(status_code=400, detail="No face detected in reference image")
 
-        ref_box = detector_mediapipe.get_largest_face(ref_boxes)
+        ref_box = detector.get_largest_face(ref_boxes)
 
         landmark_detector = get_landmark_detector()
         ref_lm106 = landmark_detector.get_landmarks(ref_rgb, ref_box)
@@ -287,7 +309,7 @@ async def match_face(
             raise HTTPException(status_code=400, detail="Failed to load target image")
         target_rgb = io_image.bgr_to_rgb(target_bgr)
 
-        target_boxes = detector_mediapipe.detect_faces(target_rgb)
+        target_boxes = detector.detect_faces(target_rgb)
         num_faces = len(target_boxes)
         if not target_boxes:
              return JSONResponse(content={

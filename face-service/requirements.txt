@@ -11,10 +11,7 @@ psutil>=5.9.0
 # Structured logging
 structlog>=24.0.0
 
-# Face detection (commercial-safe, fast, multi-face, 6 keypoints)
-mediapipe>=0.10.0
-
-# Face embedding — ArcFace R50 ONNX (512-d, replaces dlib/face_recognition)
+# Face detection (SCRFD-10GF) + Face embedding (ArcFace R100/glintr100)
 onnxruntime>=1.17.0
 
 # Image I/O and preprocessing

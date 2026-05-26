@@ -15,7 +15,7 @@ sys.path.insert(0, str(ROOT))
 
 import numpy as np
 
-from app.detector_mediapipe import detect_faces
+from app.detector_scrfd import detect_faces
 from app.embedder import FaceRecognitionEmbedder, euclidean_distance
 from app.io_image import load_image, bgr_to_rgb, crop_face_region
 from app.vault import FaceVault

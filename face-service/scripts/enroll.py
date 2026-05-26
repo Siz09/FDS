@@ -16,7 +16,7 @@ sys.path.insert(0, str(ROOT))
 
 import numpy as np
 
-from app.detector_mediapipe import detect_faces, get_largest_face
+from app.detector_scrfd import detect_faces, get_largest_face
 from app.embedder import FaceRecognitionEmbedder
 from app.io_image import bgr_to_rgb, crop_face_region, load_image
 
